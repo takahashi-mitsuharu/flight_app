@@ -1,6 +1,6 @@
 import 'dart:convert';
 import 'dart:math' as math;
-import 'package:flutter/foundation.dart'; // kIsWebを使用するために必要
+// kIsWebを使用するために必要
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:geolocator/geolocator.dart';
@@ -64,6 +64,10 @@ class _FlightSimulatorPageState extends State<FlightSimulatorPage>
   final ValueNotifier<double> _pitchNotifier = ValueNotifier(60.0);
   // HUDの表示状態
   bool _isHudVisible = false;
+  // 地図モード (0: 衛星, 1: 標準, 2: ハイブリッド)
+  int _mapMode = 0;
+  // ハイブリッドモード時の透明度
+  double _overlayOpacity = 0.5;
 
   @override
   void initState() {
@@ -187,52 +191,74 @@ class _FlightSimulatorPageState extends State<FlightSimulatorPage>
   String _buildStyleJson() {
     // OpenFreeMapで表示されない問題が発生したため、確実に動作するMapTilerに戻します。
     // 以前のAPIキーを使用します。
-    const String apiKey = 'Ch2l3pf3rAIqvK9J4QyW';
+    const String apiKey = 'JKnzrvTJYzZYRMufAObp';
+
+    // 共通のソース（地形）
+    final Map<String, dynamic> sources = {
+      "terrain-source": {
+        "type": "raster-dem",
+        "url":
+            "https://api.maptiler.com/tiles/terrain-rgb/tiles.json?key=$apiKey",
+        "tileSize": 256,
+      },
+      "satellite-source": {
+        "type": "raster",
+        "tiles": [
+          "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+        ],
+        "tileSize": 256,
+        "attribution":
+            "Esri, Maxar, Earthstar Geographics, and the GIS User Community",
+      },
+      "osm-source": {
+        "type": "raster",
+        "tiles": ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
+        "tileSize": 256,
+        "attribution": "© OpenStreetMap contributors",
+      },
+    };
+
+    List<Map<String, dynamic>> layers = [
+      // 背景レイヤー
+      {
+        "id": "background",
+        "type": "background",
+        "paint": {"background-color": "#000000"},
+      },
+    ];
+
+    if (_mapMode == 0 || _mapMode == 2) {
+      layers.add({
+        "id": "satellite-layer",
+        "type": "raster",
+        "source": "satellite-source",
+        "paint": {"raster-opacity": 1.0},
+      });
+    }
+
+    if (_mapMode == 1 || _mapMode == 2) {
+      layers.add({
+        "id": "osm-layer",
+        "type": "raster",
+        "source": "osm-source",
+        "paint": {
+          "raster-opacity": _mapMode == 2 ? _overlayOpacity : 1.0,
+        }, // ハイブリッド時は変数を使用
+      });
+    }
 
     return jsonEncode({
       "version": 8,
       // フォントデータを取得するためのURLテンプレートを追加（これがないとテキスト関連のエラーでクラッシュします）
       "glyphs":
           "https://api.maptiler.com/fonts/{fontstack}/{range}.pbf?key=$apiKey",
-      "sources": {
-        // 1. ArcGIS 衛星画像 (Raster Tiles)
-        "arcgis-satellite": {
-          "type": "raster",
-          "tiles": [
-            "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
-          ],
-          "tileSize": 256,
-          "attribution":
-              "Esri, Maxar, Earthstar Geographics, and the GIS User Community",
-        },
-        // 2. 地形データ (Terrain-RGB)
-        "terrain-source": {
-          "type": "raster-dem",
-          "url":
-              "https://api.maptiler.com/tiles/terrain-rgb/tiles.json?key=$apiKey",
-          "tileSize": 256,
-        },
-      },
+      "sources": sources,
       // 地形表示を有効化
       "terrain": {
         "source": "terrain-source",
         "exaggeration": 1.5, // 起伏を少し強調して表示
       },
-      "layers": [
-        // 背景レイヤー
-        {
-          "id": "background",
-          "type": "background",
-          "paint": {"background-color": "#000000"},
-        },
-        // 衛星画像レイヤー
-        {
-          "id": "satellite-layer",
-          "type": "raster",
-          "source": "arcgis-satellite",
-          "paint": {"raster-opacity": 1.0},
-        },
-      ],
+      "layers": layers,
     });
   }
 
@@ -332,9 +358,9 @@ class _FlightSimulatorPageState extends State<FlightSimulatorPage>
               rotateGesturesEnabled: true, // 回転を許可（ピッチ変更に影響する可能性があるため明示的に有効化）
               zoomGesturesEnabled: true, // ズームを許可
               onStyleLoadedCallback: () {
-                // スタイル読み込み完了後に確実に初期位置（ピッチ含む）を適用
+                // スタイル読み込み完了後に現在位置（ピッチ含む）を適用
                 mapController?.moveCamera(
-                  CameraUpdate.newCameraPosition(_initialCameraPosition),
+                  CameraUpdate.newCameraPosition(_currentCameraPosition),
                 );
               },
               // 【修正】Web版でのズーム起点ズレやパフォーマンス低下を防ぐため false に設定
@@ -457,6 +483,57 @@ class _FlightSimulatorPageState extends State<FlightSimulatorPage>
               ),
             ),
           ),
+
+          // 地図モード切替ボタン
+          Positioned(
+            top: 170,
+            right: 20,
+            child: FloatingActionButton(
+              mini: true,
+              backgroundColor: Colors.white.withOpacity(0.8),
+              onPressed: () {
+                setState(() {
+                  _mapMode = (_mapMode + 1) % 3;
+                });
+              },
+              child: Icon(
+                _mapMode == 0
+                    ? Icons.satellite
+                    : (_mapMode == 1 ? Icons.map : Icons.layers),
+                color: Colors.black,
+              ),
+            ),
+          ),
+
+          // ハイブリッドモード用 透明度スライダー
+          if (_mapMode == 2)
+            Positioned(
+              top: 230,
+              right: 10,
+              child: RotatedBox(
+                quarterTurns: 3, // 縦向きにする
+                child: Container(
+                  width: 150,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: Colors.black.withOpacity(0.5),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  child: Slider(
+                    value: _overlayOpacity,
+                    min: 0.0,
+                    max: 1.0,
+                    activeColor: Colors.white,
+                    inactiveColor: Colors.white.withOpacity(0.3),
+                    onChanged: (value) {
+                      setState(() {
+                        _overlayOpacity = value;
+                      });
+                    },
+                  ),
+                ),
+              ),
+            ),
         ],
       ),
     );
