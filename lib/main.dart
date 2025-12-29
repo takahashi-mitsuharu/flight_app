@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 // kIsWebを使用するために必要
@@ -68,6 +69,9 @@ class _FlightSimulatorPageState extends State<FlightSimulatorPage>
   int _mapMode = 0;
   // ハイブリッドモード時の透明度
   double _overlayOpacity = 0.5;
+  // GPSモード（ナビモード）の状態
+  bool _isGpsMode = false;
+  StreamSubscription<Position>? _gpsSubscription;
 
   @override
   void initState() {
@@ -84,6 +88,7 @@ class _FlightSimulatorPageState extends State<FlightSimulatorPage>
     _altitudeNotifier.dispose();
     _rollNotifier.dispose();
     _pitchNotifier.dispose();
+    _gpsSubscription?.cancel();
     super.dispose();
   }
 
@@ -93,6 +98,14 @@ class _FlightSimulatorPageState extends State<FlightSimulatorPage>
 
     // 入力の有無を確認
     bool hasInput = _moveInput != Offset.zero || _lookInput != Offset.zero;
+
+    // GPSモード中にジョイスティック操作があれば解除
+    if (_isGpsMode && hasInput) {
+      _disableGpsMode();
+    }
+
+    // GPSモード中はフライトシミュレーション（移動計算）を行わない
+    if (_isGpsMode) return;
 
     // --- ロール（Roll）の計算 ---
     // 旋回入力 (_lookInput.dx) に応じて機体を傾ける (最大20度)
@@ -262,8 +275,8 @@ class _FlightSimulatorPageState extends State<FlightSimulatorPage>
     });
   }
 
-  // 現在地を取得してカメラを移動する
-  Future<void> _moveToCurrentLocation() async {
+  // GPSモードを有効化（現在地に追従）
+  Future<void> _enableGpsMode() async {
     bool serviceEnabled;
     LocationPermission permission;
 
@@ -289,29 +302,46 @@ class _FlightSimulatorPageState extends State<FlightSimulatorPage>
       return;
     }
 
-    // 3. 現在地の取得
-    final Position position = await Geolocator.getCurrentPosition();
+    setState(() {
+      _isGpsMode = true;
+      _rollNotifier.value = 0.0; // ロールをリセット
+    });
 
-    if (!mounted) return;
+    // 既存のサブスクリプションがあればキャンセル
+    await _gpsSubscription?.cancel();
 
-    // 4. カメラ位置の更新
-    if (mapController != null) {
-      final LatLng currentLatLng = LatLng(
-        position.latitude,
-        position.longitude,
-      );
+    // 位置情報のストリームを購読
+    _gpsSubscription =
+        Geolocator.getPositionStream(
+          locationSettings: const LocationSettings(
+            accuracy: LocationAccuracy.high,
+            distanceFilter: 5, // 5mごとの更新
+          ),
+        ).listen((Position position) {
+          if (!mounted || mapController == null) return;
 
-      // 現在位置変数を更新（ジョイスティック操作の基準点となるため重要）
-      _currentCameraPosition = CameraPosition(
-        target: currentLatLng,
-        zoom: 16.0,
-        tilt: 60.0,
-        bearing: 0.0,
-      );
+          // 現在のズームやチルトは維持しつつ、位置だけ更新
+          _currentCameraPosition = CameraPosition(
+            target: LatLng(position.latitude, position.longitude),
+            zoom: _currentCameraPosition.zoom,
+            tilt: _currentCameraPosition.tilt,
+            bearing: _currentCameraPosition.bearing,
+          );
 
-      mapController!.moveCamera(
-        CameraUpdate.newCameraPosition(_currentCameraPosition),
-      );
+          mapController!.moveCamera(
+            CameraUpdate.newCameraPosition(_currentCameraPosition),
+          );
+        });
+  }
+
+  // GPSモードを解除
+  void _disableGpsMode() {
+    if (_isGpsMode) {
+      setState(() {
+        _isGpsMode = false;
+      });
+      _gpsSubscription?.cancel();
+      _gpsSubscription = null;
     }
   }
 
@@ -322,7 +352,7 @@ class _FlightSimulatorPageState extends State<FlightSimulatorPage>
       CameraUpdate.newCameraPosition(_initialCameraPosition),
     );
     // その後、現在地取得を試みる
-    _moveToCurrentLocation();
+    _enableGpsMode();
   }
 
   @override
@@ -343,31 +373,35 @@ class _FlightSimulatorPageState extends State<FlightSimulatorPage>
                 child: child,
               );
             },
-            child: MapLibreMap(
-              onMapCreated: _onMapCreated,
-              initialCameraPosition: _initialCameraPosition,
-              // カメラが動いたときに現在位置変数を更新する
-              onCameraMove: (position) {
-                // ジョイスティック操作中は、自前の計算値を優先するため更新しない
-                if (_moveInput == Offset.zero && _lookInput == Offset.zero) {
-                  _currentCameraPosition = position;
-                }
-              },
-              styleString: _buildStyleJson(),
-              tiltGesturesEnabled: true, // 手動での傾けを許可
-              rotateGesturesEnabled: true, // 回転を許可（ピッチ変更に影響する可能性があるため明示的に有効化）
-              zoomGesturesEnabled: true, // ズームを許可
-              onStyleLoadedCallback: () {
-                // スタイル読み込み完了後に現在位置（ピッチ含む）を適用
-                mapController?.moveCamera(
-                  CameraUpdate.newCameraPosition(_currentCameraPosition),
-                );
-              },
-              // 【修正】Web版でのズーム起点ズレやパフォーマンス低下を防ぐため false に設定
-              trackCameraPosition: false,
-              // 以下の2行を追加してWebの制限を緩和します
-              minMaxZoomPreference: const MinMaxZoomPreference(0, 20),
-              myLocationEnabled: false,
+            // 地図へのタッチ操作（手動移動）を検出してGPSモードを解除
+            child: Listener(
+              onPointerDown: (_) => _disableGpsMode(),
+              child: MapLibreMap(
+                onMapCreated: _onMapCreated,
+                initialCameraPosition: _initialCameraPosition,
+                // カメラが動いたときに現在位置変数を更新する
+                onCameraMove: (position) {
+                  // ジョイスティック操作中は、自前の計算値を優先するため更新しない
+                  if (_moveInput == Offset.zero && _lookInput == Offset.zero) {
+                    _currentCameraPosition = position;
+                  }
+                },
+                styleString: _buildStyleJson(),
+                tiltGesturesEnabled: true, // 手動での傾けを許可
+                rotateGesturesEnabled: true, // 回転を許可（ピッチ変更に影響する可能性があるため明示的に有効化）
+                zoomGesturesEnabled: true, // ズームを許可
+                onStyleLoadedCallback: () {
+                  // スタイル読み込み完了後に現在位置（ピッチ含む）を適用
+                  mapController?.moveCamera(
+                    CameraUpdate.newCameraPosition(_currentCameraPosition),
+                  );
+                },
+                // 【修正】Web版でのズーム起点ズレやパフォーマンス低下を防ぐため false に設定
+                trackCameraPosition: false,
+                // 以下の2行を追加してWebの制限を緩和します
+                minMaxZoomPreference: const MinMaxZoomPreference(0, 20),
+                myLocationEnabled: false,
+              ),
             ),
           ),
 
@@ -453,15 +487,18 @@ class _FlightSimulatorPageState extends State<FlightSimulatorPage>
             ),
           ),
 
-          // リセットボタン（初期位置に戻る）
+          // GPSモードボタン（現在地追従）
           Positioned(
             top: 50,
             right: 20,
             child: FloatingActionButton(
               mini: true,
               backgroundColor: Colors.white.withOpacity(0.8),
-              onPressed: _moveToCurrentLocation, // リセットボタンも現在地への移動に変更
-              child: const Icon(Icons.my_location, color: Colors.black),
+              onPressed: _enableGpsMode,
+              child: Icon(
+                Icons.my_location,
+                color: _isGpsMode ? Colors.blue : Colors.black,
+              ),
             ),
           ),
 
