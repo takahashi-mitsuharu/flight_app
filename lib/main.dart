@@ -320,17 +320,28 @@ class _FlightSimulatorPageState extends State<FlightSimulatorPage>
         ).listen((Position position) {
           if (!mounted || mapController == null) return;
 
-          // 現在のズームやチルトは維持しつつ、位置だけ更新
+          // ヘディング（進行方向）の反映
+          // 停止中などはヘディングが不安定なため、ある程度速度が出ている場合のみ更新 (1m/s ≈ 3.6km/h)
+          double newBearing = _currentCameraPosition.bearing;
+          if (position.speed > 1.0) {
+            newBearing = position.heading;
+          }
+
+          // 現在のズームやチルトは維持しつつ、位置と向きを更新
           _currentCameraPosition = CameraPosition(
             target: LatLng(position.latitude, position.longitude),
             zoom: _currentCameraPosition.zoom,
             tilt: _currentCameraPosition.tilt,
-            bearing: _currentCameraPosition.bearing,
+            bearing: newBearing,
           );
 
           mapController!.moveCamera(
             CameraUpdate.newCameraPosition(_currentCameraPosition),
           );
+
+          // GPSモード中は _onTick がスキップされるため、ここで情報表示を更新する
+          _speedNotifier.value = (position.speed * 3.6).toInt(); // m/s -> km/h
+          _altitudeNotifier.value = position.altitude.toInt();
         });
   }
 
