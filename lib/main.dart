@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
+import 'package:flutter/gestures.dart';
 // kIsWebを使用するために必要
 import 'package:flutter/material.dart';
 import 'package:flutter/scheduler.dart';
@@ -63,6 +64,10 @@ class _FlightSimulatorPageState extends State<FlightSimulatorPage>
   final ValueNotifier<double> _rollNotifier = ValueNotifier(0.0);
   // 【追加】ピッチ角（Tilt）制御用のNotifier (HUD用)
   final ValueNotifier<double> _pitchNotifier = ValueNotifier(60.0);
+  // 【追加】方位（Bearing）制御用のNotifier
+  final ValueNotifier<double> _bearingNotifier = ValueNotifier(
+    _initialCameraPosition.bearing,
+  );
   // HUDの表示状態
   bool _isHudVisible = false;
   // 地図モード (0: 衛星, 1: 標準, 2: ハイブリッド)
@@ -88,6 +93,7 @@ class _FlightSimulatorPageState extends State<FlightSimulatorPage>
     _altitudeNotifier.dispose();
     _rollNotifier.dispose();
     _pitchNotifier.dispose();
+    _bearingNotifier.dispose();
     _gpsSubscription?.cancel();
     super.dispose();
   }
@@ -195,6 +201,11 @@ class _FlightSimulatorPageState extends State<FlightSimulatorPage>
     double currentSpeedKmh = _moveInput.distance * 1200.0;
     if (_speedNotifier.value != currentSpeedKmh.toInt()) {
       _speedNotifier.value = currentSpeedKmh.toInt();
+    }
+
+    // コンパス用の方位更新
+    if ((_bearingNotifier.value - newBearing).abs() > 0.1) {
+      _bearingNotifier.value = newBearing;
     }
   }
 
@@ -331,7 +342,7 @@ class _FlightSimulatorPageState extends State<FlightSimulatorPage>
           _currentCameraPosition = CameraPosition(
             target: LatLng(position.latitude, position.longitude),
             zoom: _currentCameraPosition.zoom,
-            tilt: _currentCameraPosition.tilt,
+            tilt: _currentCameraPosition.tilt, // 現在のチルトを維持
             bearing: newBearing,
           );
 
@@ -342,6 +353,10 @@ class _FlightSimulatorPageState extends State<FlightSimulatorPage>
           // GPSモード中は _onTick がスキップされるため、ここで情報表示を更新する
           _speedNotifier.value = (position.speed * 3.6).toInt(); // m/s -> km/h
           _altitudeNotifier.value = position.altitude.toInt();
+          // アイコンの傾き用にピッチも更新
+          _pitchNotifier.value = _currentCameraPosition.tilt;
+          // コンパス用の方位更新
+          _bearingNotifier.value = newBearing;
         });
   }
 
@@ -387,6 +402,12 @@ class _FlightSimulatorPageState extends State<FlightSimulatorPage>
             // 地図へのタッチ操作（手動移動）を検出してGPSモードを解除
             child: Listener(
               onPointerDown: (_) => _disableGpsMode(),
+              // マウスホイール（スクロール）操作も検知して解除
+              onPointerSignal: (pointerSignal) {
+                if (pointerSignal is PointerScrollEvent) {
+                  _disableGpsMode();
+                }
+              },
               child: MapLibreMap(
                 onMapCreated: _onMapCreated,
                 initialCameraPosition: _initialCameraPosition,
@@ -395,6 +416,8 @@ class _FlightSimulatorPageState extends State<FlightSimulatorPage>
                   // ジョイスティック操作中は、自前の計算値を優先するため更新しない
                   if (_moveInput == Offset.zero && _lookInput == Offset.zero) {
                     _currentCameraPosition = position;
+                    // 手動操作時のコンパス更新
+                    _bearingNotifier.value = position.bearing;
                   }
                 },
                 styleString: _buildStyleJson(),
@@ -415,6 +438,35 @@ class _FlightSimulatorPageState extends State<FlightSimulatorPage>
               ),
             ),
           ),
+
+          // GPSモード時の現在地アイコン (画面中央に固定)
+          if (_isGpsMode)
+            IgnorePointer(
+              child: Center(
+                child: ValueListenableBuilder<double>(
+                  valueListenable: _pitchNotifier,
+                  builder: (context, pitch, child) {
+                    // ピッチに応じてアイコンを倒す（3D的に見せる）
+                    // Icons.navigation は通常右斜め上(45度)を向いているため補正する
+                    return Transform(
+                      alignment: Alignment.center,
+                      transform: Matrix4.identity()
+                        ..setEntry(3, 2, 0.001) // 遠近感
+                        ..rotateX(pitch * math.pi / 180.0) // ピッチに合わせて倒す
+                        ..rotateZ(-math.pi / 4), // 上を向くように補正
+                      child: const Icon(
+                        Icons.navigation,
+                        color: Colors.lightBlueAccent,
+                        size: 50,
+                        shadows: [
+                          Shadow(blurRadius: 10, color: Colors.black54),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+              ),
+            ),
 
           // 3. HUD Layer (Pitch Ladder) - Mapと同じく回転させる
           if (_isHudVisible)
@@ -470,24 +522,24 @@ class _FlightSimulatorPageState extends State<FlightSimulatorPage>
             ),
           ),
 
-          // タイトル表示（デバッグ用）
-          const Positioned(
-            top: 50,
+          // コンパス (左上)
+          Positioned(
+            top: 40,
             left: 20,
-            child: Text(
-              "Flight Simulator Base",
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 20,
-                fontWeight: FontWeight.bold,
-                shadows: [Shadow(blurRadius: 4, color: Colors.black)],
-              ),
+            child: ValueListenableBuilder<double>(
+              valueListenable: _bearingNotifier,
+              builder: (context, bearing, child) {
+                return CustomPaint(
+                  painter: CompassPainter(bearing: bearing),
+                  size: const Size(45, 45),
+                );
+              },
             ),
           ),
 
           // 高度・速度情報の表示
           Positioned(
-            top: 80,
+            top: 100,
             left: 20,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -809,4 +861,71 @@ class HudStaticPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
+}
+
+// コンパスを描画するPainter
+class CompassPainter extends CustomPainter {
+  final double bearing;
+
+  CompassPainter({required this.bearing});
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final radius = size.width / 2;
+
+    final paint = Paint()
+      ..color = Colors.black.withOpacity(0.5)
+      ..style = PaintingStyle.fill;
+
+    // 背景円
+    canvas.drawCircle(center, radius, paint);
+
+    // 枠線
+    paint
+      ..color = Colors.white
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2;
+    canvas.drawCircle(center, radius, paint);
+
+    // 回転保存
+    canvas.save();
+    canvas.translate(center.dx, center.dy);
+    // bearingは時計回り。キャンバスを逆回転させて「北」の位置を合わせる
+    canvas.rotate(-bearing * math.pi / 180);
+
+    // 北の矢印 (赤)
+    final northPath = Path()
+      ..moveTo(0, -radius + 3)
+      ..lineTo(4, -radius + 11)
+      ..lineTo(-4, -radius + 11)
+      ..close();
+    paint
+      ..color = Colors.redAccent
+      ..style = PaintingStyle.fill;
+    canvas.drawPath(northPath, paint);
+
+    // 文字 "N"
+    final textPainter = TextPainter(
+      text: const TextSpan(
+        text: 'N',
+        style: TextStyle(
+          color: Colors.redAccent,
+          fontWeight: FontWeight.bold,
+          fontSize: 12,
+        ),
+      ),
+      textDirection: TextDirection.ltr,
+    );
+    textPainter.layout();
+    // 矢印の下に配置
+    textPainter.paint(canvas, Offset(-textPainter.width / 2, -radius + 11));
+
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(covariant CompassPainter oldDelegate) {
+    return oldDelegate.bearing != bearing;
+  }
 }
